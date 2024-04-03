@@ -17,11 +17,13 @@ int main(int argc, char *argv[])
 {
     struct addrinfo hints, *res;
     int clientSocket, recvbytes;
-    unsigned char response[TFTP_PACKET], check[BUFFER_SIZE];
+    unsigned char response[TFTP_PACKET];
     struct timespec start, end;
-    unsigned char payload[TFTP_PACKET]; 
-    char * mode;
+    unsigned char payload[TFTP_PACKET];
+    char *mode;
     int num_packets;
+    short blockno = 1;
+    int elementsWritten;
 
     if (argc != 4)
     {
@@ -31,7 +33,9 @@ int main(int argc, char *argv[])
 
     char *serverIP = argv[1];
     char *port = argv[2];
-    char *filename=argv[3] ;
+    char *filename = argv[3];
+
+    FILE *fd = fopen(filename, "wb");
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
@@ -48,82 +52,59 @@ int main(int argc, char *argv[])
 
     printf("Client: socket has been created\n");
 
-    short opcode= 1;  // first write implement for the reading files . RRQ
+    short opcode = 1; // first write implement for the reading files . RRQ
 
-    memset(response, 0, BUFFER_SIZE);
-    memcpy(response,&opcode,sizeof(short));
-    memcpy(response+2,filename,sizeof(filename));
-    memcpy(response+2+sizeof(filename)+1,MODE,sizeof(MODE));
+    memset(response, 0, TFTP_PACKET);
+    memcpy(response, &opcode, sizeof(short));
+    memcpy(response + 2, filename, strlen(filename) + 1); // Include null terminator
+    memcpy(response + 4 + strlen(filename), MODE, strlen(MODE) + 1); // Include null terminator
 
-    sendto(clientSocket,response,TFTP_PACKET,0,res->ai_addr,res->ai_addrlen);
+    sendto(clientSocket, response, TFTP_PACKET, 0, res->ai_addr, res->ai_addrlen);
+    blockno = 0;
 
-    whiel(1){
-        recvbytes = recvfrom(clientSocket, response, BUFFER_SIZE, 0, NULL, NULL);
-        if(recvbytes==516){
-            if()
-
-        }
-
-    }
-
-
-
-
-    
-
-
-
-
-    for (int i = 0; i < numPackets; i++)
+    while (1)
     {
-        memset(response, 0, BUFFER_SIZE);
-     
-        int sequenceNumber = i;
-        memcpy(response, &sequenceNumber, sizeof(int));
-        response[4] = TTL;
-        short payloadLength = P;
-        memcpy(response + 5, &payloadLength, sizeof(short));
-        memcpy(response + 7, payload, P);       
-
-        clock_gettime(CLOCK_MONOTONIC, &start);
-
-        
-        sendto(clientSocket, response, 7 + P, 0, res->ai_addr, res->ai_addrlen);
-
-     
-        recvbytes = recvfrom(clientSocket, response, BUFFER_SIZE, 0, NULL, NULL);
-        
-        
-        response[recvbytes] = '\0'; 
-
-        if (strcmp((char*)response + 7, "MALFORMED PACKET") == 0) 
+        recvbytes = recvfrom(clientSocket, response, TFTP_PACKET, 0, NULL, NULL);
+        if (recvbytes == 516)
         {
-            printf("MALFORMED PACKET\n");
+            memcpy(&opcode, response, sizeof(short));
+            if (opcode == 3)
+            {
+                elementsWritten = fwrite(response + 4, sizeof(unsigned char), recvbytes - 4, fd);
+                if (elementsWritten != recvbytes - 4)
+                {
+                    // Handle error
+                    printf("Error writing to file.\n");
+                }
+
+                memset(response, 0, BUFFER_SIZE);
+                opcode = 4;
+                memcpy(response, &opcode, sizeof(short));
+                blockno++;
+                memcpy(response + 2, &blockno, sizeof(blockno));
+                sendto(clientSocket, response, 4, 0, res->ai_addr, res->ai_addrlen);
+            }
         }
         else
         {
-            clock_gettime(CLOCK_MONOTONIC, &end);
+            // end of transmission
+            elementsWritten = fwrite(response + 4, sizeof(unsigned char), recvbytes - 4, fd);
+            if (elementsWritten != recvbytes - 4)
+            {
+                // Handle error
+                printf("Error writing to file.\n");
+            }
 
-            double time_taken;
-            time_taken = (end.tv_sec - start.tv_sec) * 1e9;
-            time_taken = (time_taken + (end.tv_nsec - start.tv_nsec)) * 1e-9;
-
-            printf("Packet %d RTT: %f seconds\n", i, time_taken);
+            memset(response, 0, BUFFER_SIZE);
+            opcode = 4;
+            memcpy(response, &opcode, sizeof(short));
+            blockno++;
+            memcpy(response + 2, &blockno, sizeof(blockno));
+            sendto(clientSocket, response, 4, 0, res->ai_addr, res->ai_addrlen);
+            break;
         }
-
-        
     }
-
-
-
-
-
-
-
-
-    // Initializing payload with 'a'
-    memset(payload, 'a', P); 
-
+    fclose(fd);
 
     close(clientSocket);
     return 0;
