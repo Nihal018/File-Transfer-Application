@@ -56,10 +56,18 @@ int main(int argc, char *argv[])
 
     memset(response, 0, TFTP_PACKET);
     memcpy(response, &opcode, sizeof(short));
-    memcpy(response + 2, filename, strlen(filename) + 1); // Include null terminator
-    memcpy(response + 4 + strlen(filename), MODE, strlen(MODE) + 1); // Include null terminator
 
-    sendto(clientSocket, response, TFTP_PACKET, 0, res->ai_addr, res->ai_addrlen);
+    memcpy(response + 2, filename, strlen(filename));
+    // Add a null byte after the filename
+    response[2 + strlen(filename)] = '\0';
+    // Copy the mode
+    memcpy(response + 3 + strlen(filename), MODE, strlen(MODE));
+    // Add a final null byte after the mode
+    response[3 + strlen(filename) + strlen(MODE)] = '\0';
+
+    size_t packet_len = 2 + strlen(filename) + 1 + strlen(MODE) + 1;
+    sendto(clientSocket, response, packet_len, 0, res->ai_addr, res->ai_addrlen);
+
     blockno = 0;
 
     while (1)
