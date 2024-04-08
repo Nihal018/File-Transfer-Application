@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <errno.h>
 
@@ -13,18 +14,21 @@
 #define TFTP_PACKET 516
 #define MODE "octet"
 
-int main(int argc, char *argv[])
-{
+#define OP_RRQ 1
+#define OP_WRQ 2
+#define OP_DATA 3
+#define OP_ACK 4
+#define OP_ERROR 5
+
+int main(int argc, char *argv[]) {
     struct addrinfo hints, *res;
     int clientSocket, recvbytes;
-    unsigned char response[TFTP_PACKET];
-    short blockno = 0; // Initialized to 0 for the first ACK
-    int elementsWritten;
-    unsigned char lastAckPacket[4];
-    size_t lastAckPacketLen = 0;
+    char buffer[TFTP_PACKET];
+    short blockno = 1; // For the first data packet, block number starts from 1
+    int elementsWritten,receivedBlockNo;
+    size_t packet_len;
 
-    if (argc != 4)
-    {
+    if (argc != 4) {
         fprintf(stderr, "Usage: %s <ServerIP> <ServerPort> <Filename>\n", argv[0]);
         exit(1);
     }
@@ -33,125 +37,84 @@ int main(int argc, char *argv[])
     char *port = argv[2];
     char *filename = argv[3];
 
-    FILE *fd = fopen(filename, "wb");
-    if (!fd)
-    {
-        perror("Cannot open file");
-        exit(EXIT_FAILURE);
+    int fp = open(filename, O_RDWR | O_CREAT, 0777);
+    if (fp == -1) {
+        perror("File opening failed");
+        return 1;
     }
 
     memset(&hints, 0, sizeof hints);
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
 
-    if (getaddrinfo(serverIP, port, &hints, &res) != 0)
-    {
+    if (getaddrinfo(serverIP, port, &hints, &res) != 0) {
         perror("getaddrinfo failed");
         exit(EXIT_FAILURE);
     }
 
     clientSocket = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (clientSocket == -1)
-    {
+    if (clientSocket == -1) {
         perror("Error creating client socket");
         exit(EXIT_FAILURE);
     }
 
-    // Set the socket timeout for recvfrom
-    struct timeval timeout;
-    timeout.tv_sec = 0; // 5 seconds timeout
-    timeout.tv_usec = 500000;
-
-    if (setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0)
-    {
-        perror("setsockopt failed");
-        exit(EXIT_FAILURE);
-    }
-
     // Prepare the RRQ packet
-    short opcode = htons(1); // RRQ opcode in network byte order
-    size_t packet_len = 2 + strlen(filename) + 1 + strlen(MODE) + 1;
-    memset(response, 0, TFTP_PACKET);
-    memcpy(response, &opcode, sizeof(short));
-    strcpy((char *)response + 2, filename);
-    strcpy((char *)response + 3 + strlen(filename), MODE);
+    short opcode = htons(OP_RRQ); // RRQ opcode in network byte order
+    packet_len = 2 + strlen(filename) + 1 + strlen(MODE) + 1; // Calculate packet length
+    memset(buffer, 0, TFTP_PACKET);
+    memcpy(buffer, &opcode, sizeof(short));
+    strcpy((char *)buffer + 2, filename); // File name
+    strcpy((char *)buffer + 3 + strlen(filename), MODE); // Mode
 
     // Send the RRQ packet
-    if (sendto(clientSocket, response, packet_len, 0, res->ai_addr, res->ai_addrlen) < 0)
-    {
+    if (sendto(clientSocket, buffer, packet_len, 0, res->ai_addr, res->ai_addrlen) < 0) {
         perror("sendto failed");
         exit(EXIT_FAILURE);
     }
 
-    while (1)
-    {
-        recvbytes = recvfrom(clientSocket, response, TFTP_PACKET, 0, NULL, NULL);
-        if (recvbytes < 0)
-        {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
-                printf("Timeout reached. Resending last ACK.\n");
-                if (lastAckPacketLen > 0)
-                {
-                    if (sendto(clientSocket, lastAckPacket, lastAckPacketLen, 0, res->ai_addr, res->ai_addrlen) < 0)
-                    {
-                        perror("sendto failed");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-                continue;
-            }
-            else
-            {
-                perror("recvfrom failed");
-                exit(EXIT_FAILURE);
-            }
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+
+    do {
+        recvbytes = recvfrom(clientSocket, buffer, TFTP_PACKET, 0, (struct sockaddr *)&from, &fromlen);
+        if (recvbytes < 0) {
+            perror("Recvfrom failed");
+            exit(EXIT_FAILURE);
         }
 
-        memcpy(&opcode, response, sizeof(short));
-        opcode = ntohs(opcode);
-        if (opcode == 3)
-        { // DATA packet
-            short receivedBlockNo;
-            memcpy(&receivedBlockNo, response + 2, sizeof(short));
-            receivedBlockNo = ntohs(receivedBlockNo);
+        // Check the opcode of the received packet
+        opcode = ntohs(*(short *)buffer);
 
-            if (receivedBlockNo == blockno + 1)
-            {
-                elementsWritten = fwrite(response + 4, 1, recvbytes - 4, fd);
-                if (elementsWritten < recvbytes - 4)
-                {
-                    fprintf(stderr, "Error writing to file\n");
-                    break;
-                }
+        if (opcode == OP_DATA) {
+            // Extract block number from the received packet
+            receivedBlockNo = ntohs(*(short *)(buffer + 2));
+            
+            // Check if the block number is the expected one
+            if (receivedBlockNo == blockno) {
 
-                blockno = receivedBlockNo; // Update block number for ACK
+                write(fp, buffer + 4, recvbytes - 4);
 
-                // Prepare ACK packet
-                memset(lastAckPacket, 0, sizeof(lastAckPacket));
-                opcode = htons(4);                 // ACK opcode
-                short netBlockNo = htons(blockno); // Convert block number to network byte order
-                memcpy(lastAckPacket, &opcode, sizeof(short));
-                memcpy(lastAckPacket + 2, &netBlockNo, sizeof(netBlockNo)); // Include block number
-                lastAckPacketLen = 4;
-
-                // Send ACK packet
-                if (sendto(clientSocket, lastAckPacket, lastAckPacketLen, 0, res->ai_addr, res->ai_addrlen) < 0)
-                {
-                    perror("sendto failed");
+                // Prepare and send ACK packet
+                *(short *)buffer = htons(OP_ACK);    
+                // Block number is already correctly placed and in network byte order
+                if (sendto(clientSocket, buffer, 4, 0, (struct sockaddr *)&from, fromlen) < 0) {
+                    perror("Sendto failed");
                     exit(EXIT_FAILURE);
                 }
 
-                if (recvbytes < 516)
-                { // Last packet
-                    printf("File transfer complete.\n");
-                    break;
-                }
+                // Increment block number for the next expected packet
+                blockno++;
             }
+        } else if (opcode == OP_ERROR) {
+            // Error handling
+            printf("Error Packet received\n");
+            break;
         }
-    }
+    } while (recvbytes == 516); // 512 bytes of data + 4 bytes header
 
-    fclose(fd);
+    printf("File transfer complete.\n");
+
+    close(fp);
     close(clientSocket);
     freeaddrinfo(res);
 
