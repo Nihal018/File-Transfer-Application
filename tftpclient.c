@@ -72,11 +72,8 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    struct sockaddr_in from;
-    socklen_t fromlen = sizeof(from);
-
     do {
-        recvbytes = recvfrom(clientSocket, buffer, TFTP_PACKET, 0, (struct sockaddr *)&from, &fromlen);
+        recvbytes = recvfrom(clientSocket, buffer, TFTP_PACKET, 0, res->ai_addr, &res->ai_addrlen);
         if (recvbytes < 0) {
             perror("Recvfrom failed");
             exit(EXIT_FAILURE);
@@ -97,7 +94,7 @@ int main(int argc, char *argv[]) {
                 // Prepare and send ACK packet
                 *(short *)buffer = htons(OP_ACK);    
                 // Block number is already correctly placed and in network byte order
-                if (sendto(clientSocket, buffer, 4, 0, (struct sockaddr *)&from, fromlen) < 0) {
+                if (sendto(clientSocket, buffer, 4, 0, res->ai_addr, res->ai_addrlen) < 0) {
                     perror("Sendto failed");
                     exit(EXIT_FAILURE);
                 }
